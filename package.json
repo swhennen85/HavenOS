@@ -5,10 +5,11 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node server/index.mjs",
+    "start": "node server/index.mjs --production",
     "build": "tsc -b && vite build",
-    "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "preview": "node server/index.mjs --production"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
