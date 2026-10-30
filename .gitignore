@@ -10,3 +10,5 @@ tools/node-runtime/
 tools/npm-global/
 node_modules/
 dist/
+data/*.sqlite
+data/*.sqlite-*
