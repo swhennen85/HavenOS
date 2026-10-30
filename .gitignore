@@ -5,3 +5,6 @@ dist/
 !.env.example
 *.local
 .DS_Store
+tools/node/
+node_modules/
+dist/
