@@ -40,9 +40,17 @@ const NOMINATIM_URL =
   process.env.HAVENOS_GEOCODER_URL ||
   "https://nominatim.openstreetmap.org/search";
 
-const OVERPASS_URL =
-  process.env.HAVENOS_OVERPASS_URL ||
-  "https://overpass-api.de/api/interpreter";
+// Try multiple public Overpass instances if one is unavailable.
+// A custom endpoint can be supplied through HAVENOS_OVERPASS_URL.
+const OVERPASS_URLS = [
+  process.env.HAVENOS_OVERPASS_URL,
+  "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+  "https://overpass-api.de/api/interpreter",
+].filter(
+  (url, index, list) =>
+    url && list.indexOf(url) === index,
+);
 
 const USER_AGENT =
   "HavenOS/0.1 (local resource discovery; https://github.com/swhennen85/HavenOS)";
@@ -210,12 +218,6 @@ function mapResource(row) {
   };
 }
 
-// IMPORTANT:
-// resource_sources is now correctly joined.
-// The LEFT JOIN preserves services that have no source record.
-// The subquery chooses the latest source record without
-// duplicating service listings.
-
 const resourceSelect = `
   SELECT
     s.id AS service_id,
@@ -297,10 +299,8 @@ async function geocodeLocation(location) {
   }
 
   // Public Nominatim usage:
-  // - User-triggered searches
-  // - Identifying User-Agent
-  // - Caching
-  // - Maximum one request per second per application
+  // User-triggered searches, identifying User-Agent,
+  // caching, and at most one request per second.
 
   const waitMs = Math.max(
     0,
@@ -355,7 +355,9 @@ async function geocodeLocation(location) {
     !Number.isFinite(point.lat) ||
     !Number.isFinite(point.lon)
   ) {
-    throw new Error("Location lookup returned invalid coordinates.");
+    throw new Error(
+      "Location lookup returned invalid coordinates.",
+    );
   }
 
   db.prepare(`
@@ -447,6 +449,102 @@ function makeOverpassQuery(lat, lon, category) {
     .join("");
 
   return `[out:json][timeout:25];(${selectors});out center tags;`;
+}
+
+// --------------------------------------------------
+// OPENSTREETMAP MULTI-ENDPOINT REQUEST
+// --------------------------------------------------
+
+async function requestOverpass(query) {
+  const errors = [];
+
+  for (const endpoint of OVERPASS_URLS) {
+    try {
+      console.log(
+        `Trying OpenStreetMap source: ${endpoint}`,
+      );
+
+      const response = await fetch(endpoint, {
+        method: "POST",
+
+        headers: {
+          "User-Agent": USER_AGENT,
+          "Content-Type":
+            "application/x-www-form-urlencoded; charset=UTF-8",
+          "Accept": "application/json",
+        },
+
+        body: new URLSearchParams({
+          data: query,
+        }),
+
+        signal: AbortSignal.timeout(35000),
+      });
+
+      const responseText = await response.text();
+
+      if (!response.ok) {
+        const detail = responseText.slice(0, 300);
+
+        errors.push(
+          `${endpoint}: HTTP ${response.status} ${detail}`,
+        );
+
+        console.warn(
+          `Overpass endpoint failed (${response.status}): ${endpoint}`,
+        );
+
+        continue;
+      }
+
+      let payload;
+
+      try {
+        payload = JSON.parse(responseText);
+      } catch {
+        errors.push(
+          `${endpoint}: Invalid JSON response.`,
+        );
+
+        continue;
+      }
+
+      if (!Array.isArray(payload.elements)) {
+        errors.push(
+          `${endpoint}: Missing elements array.`,
+        );
+
+        continue;
+      }
+
+      console.log(
+        `OpenStreetMap discovery succeeded: ${endpoint}`,
+      );
+
+      return {
+        payload,
+        endpoint,
+      };
+
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      errors.push(`${endpoint}: ${message}`);
+
+      console.warn(
+        `Overpass endpoint unavailable: ${endpoint}`,
+        message,
+      );
+    }
+  }
+
+  throw new Error(
+    "All OpenStreetMap discovery endpoints failed. " +
+    errors.join(" | "),
+  );
 }
 
 // --------------------------------------------------
@@ -578,42 +676,21 @@ async function discoverResources(location, category) {
     category,
   );
 
-  const response = await fetch(OVERPASS_URL, {
-    method: "POST",
+  // This helper tries each endpoint in sequence.
+  // It returns the first valid Overpass response.
+  const { payload, endpoint } =
+    await requestOverpass(query);
 
-    headers: {
-      "User-Agent": USER_AGENT,
-      "Content-Type":
-        "application/x-www-form-urlencoded; charset=UTF-8",
-      "Accept": "application/json",
-    },
-
-    body: new URLSearchParams({
-      data: query,
-    }),
-
-    signal: AbortSignal.timeout(35000),
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `OpenStreetMap discovery returned HTTP ${response.status}. Please retry shortly.`,
-    );
-  }
-
-  const payload = await response.json();
-
-  if (!Array.isArray(payload.elements)) {
-    throw new Error(
-      "OpenStreetMap returned an unexpected response.",
-    );
-  }
-
+  // Only one payload and one candidates declaration.
   const candidates = payload.elements
     .map(element =>
       candidateFromElement(element, category),
     )
     .filter(Boolean);
+
+  console.log(
+    `Discovered ${candidates.length} places using ${endpoint}`,
+  );
 
   // Save discovered places without overwriting
   // published HavenOS service records.
@@ -1139,6 +1216,10 @@ httpServer.listen(
 
     console.log(
       `SQLite database: ${path.join(dataDir, "havenos.sqlite")}`,
+    );
+
+    console.log(
+      `OpenStreetMap endpoints configured: ${OVERPASS_URLS.length}`,
     );
   },
 );
