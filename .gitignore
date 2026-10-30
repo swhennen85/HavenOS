@@ -6,5 +6,7 @@ dist/
 *.local
 .DS_Store
 tools/node/
+tools/node-runtime/
+tools/npm-global/
 node_modules/
 dist/
